@@ -1065,9 +1065,29 @@ class CartController extends ChangeNotifier {
   final Map<String, int> _qty = {};
 
   int get count => _qty.values.fold(0, (a, b) => a + b);
+  Map<String, int> get entries => Map.unmodifiable(_qty);
 
   void add(String name, [int quantity = 1]) {
     _qty[name] = (_qty[name] ?? 0) + quantity;
+    notifyListeners();
+  }
+
+  void setQuantity(String name, int quantity) {
+    if (quantity <= 0) {
+      _qty.remove(name);
+    } else {
+      _qty[name] = quantity;
+    }
+    notifyListeners();
+  }
+
+  void remove(String name) {
+    if (_qty.remove(name) != null) notifyListeners();
+  }
+
+  void clear() {
+    if (_qty.isEmpty) return;
+    _qty.clear();
     notifyListeners();
   }
 }
@@ -1248,14 +1268,7 @@ class _MainShellState extends State<MainShell> {
         onProductChat: (p) => _openInbox(productHint: p),
         onOpenWishlist: () => setState(() => index = 3),
         onOpenCart: () {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                cart.count == 0 ? 'Your cart is empty' : '${cart.count} items in cart',
-                style: F.ui(13, color: Colors.white),
-              ),
-            ),
-          );
+          Navigator.push(context, _dreamRoute(CartScreen(cart: cart)));
         },
       ),
       CategoriesScreen(
@@ -2832,11 +2845,12 @@ class ProductDetailsScreen extends StatefulWidget {
 
 class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   void _variants({required bool checkout}) {
+    final cart = CartScope.of(context);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => VariantSheet(product: widget.product, checkoutMode: checkout),
+      builder: (_) => VariantSheet(product: widget.product, checkoutMode: checkout, cart: cart),
     );
   }
 
@@ -3124,9 +3138,10 @@ class _FootAction extends StatelessWidget {
 // VARIANT SHEET
 // ═══════════════════════════════════════════
 class VariantSheet extends StatefulWidget {
-  const VariantSheet({super.key, required this.product, required this.checkoutMode});
+  const VariantSheet({super.key, required this.product, required this.checkoutMode, required this.cart});
   final FlowerProduct product;
   final bool checkoutMode;
+  final CartController cart;
 
   @override
   State<VariantSheet> createState() => _VariantSheetState();
@@ -3307,12 +3322,11 @@ class _VariantSheetState extends State<VariantSheet> {
                     Expanded(
                       child: BloomTap(
                         onTap: () {
-                          final cart = CartScope.of(context);
                           final messenger = ScaffoldMessenger.of(context);
                           final name = p.name;
                           final n = qty;
+                          widget.cart.add(name, n);
                           Navigator.pop(context);
-                          cart.add(name, n);
                           messenger.showSnackBar(
                             SnackBar(content: Text('Added $n × $name ($sizeLabel)', style: F.ui(13, color: Colors.white))),
                           );
@@ -3332,10 +3346,11 @@ class _VariantSheetState extends State<VariantSheet> {
                     Expanded(
                       child: BloomTap(
                         onTap: () {
+                          widget.cart.add(p.name, qty);
                           Navigator.pop(context);
                           Navigator.push(
                             context,
-                            _dreamRoute(CartScreen(product: p, quantity: qty, color: sizeLabel)),
+                            _dreamRoute(CartScreen(cart: widget.cart)),
                           );
                         },
                         child: Container(
@@ -3372,20 +3387,52 @@ class _VariantSheetState extends State<VariantSheet> {
   }
 }
 
-class CartScreen extends StatelessWidget {
-  const CartScreen({
-    super.key,
-    required this.product,
-    required this.quantity,
-    required this.color,
-  });
+class CartScreen extends StatefulWidget {
+  const CartScreen({super.key, required this.cart});
+  final CartController cart;
 
-  final FlowerProduct product;
-  final int quantity;
-  final String color;
+  @override
+  State<CartScreen> createState() => _CartScreenState();
+}
+
+class _CartScreenState extends State<CartScreen> {
+  FlowerProduct? _productByName(String name) {
+    for (final p in products) {
+      if (p.name == name) return p;
+    }
+    return null;
+  }
+
+  String _peso(int value) {
+    final raw = value.toString();
+    final out = StringBuffer();
+    for (var i = 0; i < raw.length; i++) {
+      out.write(raw[i]);
+      final left = raw.length - i - 1;
+      if (left > 0 && left % 3 == 0) out.write(',');
+    }
+    return '₱$out';
+  }
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.cart,
+      builder: (context, _) => _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final cart = widget.cart;
+    final lines = <(FlowerProduct product, int qty)>[];
+    for (final e in cart.entries.entries) {
+      final p = _productByName(e.key);
+      if (p != null && e.value > 0) lines.add((p, e.value));
+    }
+    final subtotal = lines.fold<int>(0, (sum, line) => sum + (line.$1.sortPrice * line.$2));
+    final delivery = lines.isEmpty ? 0 : 120;
+    final total = subtotal + delivery;
+
     return DreamWorld(
       child: Scaffold(
         backgroundColor: Colors.transparent,
@@ -3395,35 +3442,199 @@ class CartScreen extends StatelessWidget {
           foregroundColor: Dream.ink,
           title: Text('Your Cart', style: F.script(34, color: Dream.roseDeep)),
         ),
-        body: Padding(
-          padding: const EdgeInsets.all(20),
-          child: FloatIn(
-            child: SoftGlass(
-              radius: 24,
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: NetImage(url: product.imageUrl, width: 84, height: 84),
+        body: lines.isEmpty
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.shopping_bag_outlined, size: 46, color: Dream.mist),
+                      const SizedBox(height: 12),
+                      Text('Your cart is empty', style: F.display(24)),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Add flowers from the product list to start checkout.',
+                        textAlign: TextAlign.center,
+                        style: F.ui(13, color: Dream.mist),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 14),
+                ),
+              )
+            : Column(
+                children: [
                   Expanded(
+                    child: ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 10),
+                      itemCount: lines.length,
+                      itemBuilder: (context, i) {
+                        final line = lines[i];
+                        final p = line.$1;
+                        final qty = line.$2;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: SoftGlass(
+                            radius: 22,
+                            padding: const EdgeInsets.all(12),
+                            child: Row(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: NetImage(url: p.imageUrl, width: 76, height: 76),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(p.name, style: F.display(17)),
+                                      const SizedBox(height: 2),
+                                      Text('From ${p.price}', style: F.ui(12, color: Dream.mist)),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        _peso(p.sortPrice * qty),
+                                        style: F.ui(14, color: Dream.roseDeep, weight: FontWeight.w800),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Column(
+                                  children: [
+                                    Row(
+                                      children: [
+                                        _QtyBtn(
+                                          icon: Icons.remove_rounded,
+                                          onTap: () => cart.setQuantity(p.name, qty - 1),
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                                          child: Text('$qty', style: F.ui(14, weight: FontWeight.w800)),
+                                        ),
+                                        _QtyBtn(
+                                          icon: Icons.add_rounded,
+                                          onTap: () => cart.setQuantity(p.name, qty + 1),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    BloomTap(
+                                      onTap: () => cart.remove(p.name),
+                                      child: Text('Remove', style: F.ui(11, color: Dream.mist)),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Container(
+                    padding: EdgeInsets.fromLTRB(18, 14, 18, 16 + MediaQuery.paddingOf(context).bottom),
+                    decoration: BoxDecoration(
+                      color: const Color(0xF2FFF8FB),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Dream.rose.withValues(alpha: 0.08),
+                          blurRadius: 12,
+                          offset: const Offset(0, -4),
+                        ),
+                      ],
+                    ),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(product.name, style: F.display(20)),
-                        Text('Size: $color · Qty: $quantity', style: F.ui(12, color: Dream.mist)),
-                        Text(product.price, style: F.ui(15, color: Dream.roseDeep, weight: FontWeight.w800)),
+                        _AmountRow(label: 'Subtotal', value: _peso(subtotal)),
+                        const SizedBox(height: 6),
+                        _AmountRow(label: 'Delivery', value: _peso(delivery)),
+                        const SizedBox(height: 8),
+                        _AmountRow(label: 'Total', value: _peso(total), strong: true),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: BloomTap(
+                                onTap: cart.clear,
+                                child: Container(
+                                  height: 48,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: Dream.roseDeep, width: 1.2),
+                                  ),
+                                  child: Text('Clear Cart', style: F.ui(13, color: Dream.roseDeep, weight: FontWeight.w800)),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: BloomTap(
+                                onTap: () {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('Checkout started for ${lines.length} item(s)', style: F.ui(13, color: Colors.white))),
+                                  );
+                                },
+                                child: Container(
+                                  height: 48,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    gradient: Dream.petal,
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: Text('Proceed Checkout', style: F.ui(13, color: Colors.white, weight: FontWeight.w800)),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
                 ],
               ),
-            ),
-          ),
-        ),
       ),
+    );
+  }
+}
+
+class _QtyBtn extends StatelessWidget {
+  const _QtyBtn({required this.icon, required this.onTap});
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return BloomTap(
+      onTap: onTap,
+      child: Container(
+        width: 24,
+        height: 24,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.8),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: Dream.blush),
+        ),
+        child: Icon(icon, size: 14, color: Dream.mist),
+      ),
+    );
+  }
+}
+
+class _AmountRow extends StatelessWidget {
+  const _AmountRow({required this.label, required this.value, this.strong = false});
+  final String label;
+  final String value;
+  final bool strong;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text(label, style: F.ui(13, color: strong ? Dream.roseDeep : Dream.mist, weight: strong ? FontWeight.w800 : FontWeight.w600)),
+        const Spacer(),
+        Text(value, style: F.ui(14, color: Dream.roseDeep, weight: FontWeight.w800)),
+      ],
     );
   }
 }
